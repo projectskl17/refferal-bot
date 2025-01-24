@@ -1,14 +1,15 @@
 from pymongo import MongoClient
 from datetime import datetime
-from config import MONGODB_URL, PER_REFER
+from config import MONGODB_URL, REFERRALS_PER_LEVEL
+import math
+
 
 class Database:
     def __init__(self, mongodb_uri=MONGODB_URL):
         self.client = MongoClient(mongodb_uri)
-        self.db = self.client['telegram_bot277']
-        self.users = self.db['users']
-        self.stats = self.db['stats']
-        self.join_requests = self.db['join_requests']
+        self.db = self.client['telegram_bot2096365']
+        self.users = self.db['users9']
+        self.stats = self.db['stats3']
         self._init_stats()
 
     def _init_stats(self):
@@ -16,21 +17,28 @@ class Database:
             self.stats.insert_one({
                 '_id': 'global_stats',
                 'total_users': 0,
-                'total_withdrawals': 0,
-                'total_withdrawal_amount': 0,
-                'total_refers': 0
+                'total_referrals': 0
             })
 
-    def create_user(self, user_id, referrer_id=None):
+    def calculate_level(self, referral_count):
+        if referral_count < REFERRALS_PER_LEVEL:
+            return 1
+        return 1 + math.floor(referral_count / REFERRALS_PER_LEVEL)
+
+    def get_next_level_requirements(self, current_referrals):
+        current_level = self.calculate_level(current_referrals)
+        referrals_needed = (current_level * REFERRALS_PER_LEVEL) - current_referrals
+        return referrals_needed
+
+    def create_user(self, user_id, referrer_id=None, first_name=None, username=None):
         if not self.users.find_one({'_id': user_id}):
             user_data = {
                 '_id': user_id,
+                'first_name': first_name,
+                'username': username,
+                'referrer': referrer_id if referrer_id else None,
                 'referred_users': 0,
-                'balance': 0,
-                'wallet': "none",
-                'withdrawals': 0,
-                'last_bonus': None,
-                'referrer': referrer_id if referrer_id else user_id,
+                'level': 1,
                 'refer_claimed': False,
                 'created_at': datetime.now()
             }
@@ -43,127 +51,89 @@ class Database:
             return True
         return False
 
-    def add_referral(self, referrer_id, bonus_amount):
+    def get_user(self, user_id):
+        return self.users.find_one({'_id': user_id})
+
+    def add_referral(self, referrer_id):
+        user = self.get_user(referrer_id)
+        if not user:
+            return False
+
+        current_referrals = user.get('referred_users', 0)
+        current_level = user.get('level', 1)
+
+        new_referrals = current_referrals + 1
+        new_level = self.calculate_level(new_referrals)
+
+        update_data = {
+            '$inc': {'referred_users': 1},
+            '$set': {'level': new_level}
+        }
+
         result = self.users.update_one(
             {'_id': referrer_id},
-            {
-                '$inc': {
-                    'referred_users': 1,
-                    'balance': bonus_amount
-                }
-            }
+            update_data
         )
+
         if result.modified_count > 0:
             self.stats.update_one(
                 {'_id': 'global_stats'},
-                {'$inc': {'total_refers': 1}},
+                {'$inc': {'total_referrals': 1}},
                 upsert=True
             )
-            return True
-        return False
+            return {
+                'success': True,
+                'leveled_up': new_level > current_level,
+                'new_level': new_level
+            }
+        return {'success': False}
 
     def claim_referral_bonus(self, user_id, referrer_id):
-        user = self.users.find_one({'_id': user_id})
+        user = self.get_user(user_id)
         if user and not user.get('refer_claimed', False):
             self.users.update_one(
                 {'_id': user_id},
                 {'$set': {'refer_claimed': True}}
             )
-            return self.add_referral(referrer_id, PER_REFER)
-        return False
+            return self.add_referral(referrer_id)
+        return {'success': False}
 
-    def save_join_request(self, user_id, channel_id):
-        data = {
-            'user_id': str(user_id),
-            'channel_id': str(channel_id),
-            'created_at': datetime.now()
+    def get_user_level_info(self, user_id):
+        user = self.get_user(user_id)
+        if not user:
+            return None
+
+        referral_count = user.get('referred_users', 0)
+        current_level = self.calculate_level(referral_count)
+        next_level = current_level + 1
+        referrals_needed = self.get_next_level_requirements(referral_count)
+
+        return {
+            'current_level': current_level,
+            'referral_count': referral_count,
+            'next_level': next_level,
+            'referrals_needed': referrals_needed,
+            'referrals_per_level': REFERRALS_PER_LEVEL
         }
-        self.join_requests.insert_one(data)
-        return True
-    
-    def check_join_request(self, user_id, channel_id):
-        query = {
-            'user_id': str(user_id),
-            'channel_id': str(channel_id),
-        }
-        return self.join_requests.find_one(query) is not None
 
-    def get_user(self, user_id):
-        return self.users.find_one({'_id': user_id})
+    def get_users_with_referrals(self):
+        return list(self.users.find(
+            {'referred_users': {'$gt': 0}},
+            {'_id': 1, 'first_name': 1, 'username': 1, 'referred_users': 1, 'level': 1}
+        ).sort('referred_users', -1))
 
-    def update_wallet(self, user_id, wallet_address):
-        return self.users.update_one(
-            {'_id': user_id},
-            {'$set': {
-                'wallet': wallet_address,
-                'updated_at': datetime.now()
-            }}
-        )
+    def get_referred_users(self, user_id):
+        return list(self.users.find(
+            {'referrer': user_id},
+            {'_id': 1, 'first_name': 1, 'username': 1}
+        ))
 
-    def update_balance(self, user_id, amount):
-        return self.users.update_one(
-            {'_id': user_id},
-            {
-                '$inc': {'balance': amount},
-                '$set': {'updated_at': datetime.now()}
-            }
-        )
+    def get_referred_usernames(self, user_id):
+        referred_users = self.get_referred_users(user_id)
+        return [f"{user['username']}" if user.get('username') else user['first_name'] for user in referred_users]
 
-    def get_balance(self, user_id):
-        user = self.get_user(user_id)
-        return user['balance'] if user else 0
-
-    def get_wallet(self, user_id):
-        user = self.get_user(user_id)
-        return user['wallet'] if user else "none"
-
-    def process_withdrawal(self, user_id, amount):
-        result = self.users.update_one(
-            {
-                '_id': user_id,
-                'balance': {'$gte': amount}
-            },
-            {
-                '$inc': {
-                    'balance': -amount,
-                    'withdrawals': 1
-                },
-                '$set': {'last_withdrawal': datetime.now()}
-            }
-        )
-        if result.modified_count > 0:
-            self.stats.update_one(
-                {'_id': 'global_stats'},
-                {
-                    '$inc': {
-                        'total_withdrawals': 1,
-                        'total_withdrawal_amount': amount
-                    }
-                },
-                upsert=True
-            )
-            return True
-        return False
-
-    def update_bonus_time(self, user_id):
-        return self.users.update_one(
-            {'_id': user_id},
-            {'$set': {
-                'last_bonus': datetime.now(),
-                'updated_at': datetime.now()
-            }}
-        )
-
-    def can_claim_bonus(self, user_id):
-        user = self.get_user(user_id)
-        if not user or not user.get('last_bonus'):
-            return True
-        time_diff = datetime.now() - user['last_bonus']
-        return time_diff.total_seconds() >= 86400
-
-    def get_referral_count(self, user_id):
-        user = self.get_user(user_id)
-        return user['referred_users'] if user else 0
+    def get_total_users(self):
+        return self.users.count_documents({})
 
     def get_stats(self):
         stats = self.stats.find_one({'_id': 'global_stats'})
@@ -171,18 +141,3 @@ class Database:
             self._init_stats()
             stats = self.stats.find_one({'_id': 'global_stats'})
         return stats
-
-    def get_top_referrers(self, limit=10):
-        return list(self.users.find(
-            {},
-            {'_id': 1, 'referred_users': 1}
-        ).sort('referred_users', -1).limit(limit))
-
-    def get_total_users(self):
-        return self.users.count_documents({})
-
-    def __del__(self):
-        try:
-            self.client.close()
-        except:
-            pass
