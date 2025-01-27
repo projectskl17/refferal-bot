@@ -1,7 +1,7 @@
 import telebot
 from telebot import types
 from database import Database
-from config import CHANNEL_IDS, OWNER_ID, BOT_TOKEN, MONGODB_URL, ADMIN_IDS
+from config import CHANNELS, OWNER_ID, BOT_TOKEN, MONGODB_URL, ADMIN_IDS
 from typing import Dict, Optional
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -24,7 +24,7 @@ def get_channel_invite_link(channel_id: int) -> Optional[str]:
 
 def check(user_id: int) -> bool:
     """Check if user is member of all channels"""
-    for channel_id in CHANNEL_IDS:
+    for channel_id in CHANNELS:
         try:
             check = bot.get_chat_member(channel_id, user_id)
             if check.status == 'left':
@@ -46,7 +46,7 @@ def menu(id):
 def send_join_channels_message(user_id: int):
     """Send message with channel join buttons"""
     markup = telebot.types.InlineKeyboardMarkup()
-    for channel_id in CHANNEL_IDS:
+    for channel_id in CHANNELS:
         try:
             channel_info = bot.get_chat(channel_id)
             channel_name = channel_info.title
