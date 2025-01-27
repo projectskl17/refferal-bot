@@ -64,7 +64,7 @@ def send_join_channels_message(user_id: int):
     
     markup.add(
         telebot.types.InlineKeyboardButton(
-            text='Joined ✅,
+            text='Joined ✅',
             callback_data='check'
         )
     )
