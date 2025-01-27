@@ -1,22 +1,76 @@
 import telebot
 from telebot import types
 from database import Database
-from config import CHANNELS, OWNER_ID, BOT_TOKEN, MONGODB_URL, ADMIN_IDS
+from config import CHANNEL_IDS, OWNER_ID, BOT_TOKEN, MONGODB_URL, ADMIN_IDS
+from typing import Dict, Optional
 
 bot = telebot.TeleBot(BOT_TOKEN)
 db = Database(MONGODB_URL)
 
-def check(id):
-    for i in CHANNELS:
-        check = bot.get_chat_member(i, id)
-        if check.status == 'left':
+invite_links_cache: Dict[int, str] = {}
+
+def get_channel_invite_link(channel_id: int) -> Optional[str]:
+    """Get cached invite link or generate new one"""
+    if channel_id in invite_links_cache:
+        return invite_links_cache[channel_id]
+    
+    try:
+        invite_link = bot.create_chat_invite_link(channel_id).invite_link
+        invite_links_cache[channel_id] = invite_link
+        return invite_link
+    except Exception as e:
+        print(f"Error getting invite link for channel {channel_id}: {e}")
+        return None
+
+def check(user_id: int) -> bool:
+    """Check if user is member of all channels"""
+    for channel_id in CHANNEL_IDS:
+        try:
+            check = bot.get_chat_member(channel_id, user_id)
+            if check.status == 'left':
+                return False
+        except Exception as e:
+            print(f"Error checking membership for channel {channel_id}: {e}")
             return False
     return True
 
 def menu(id):
+    if not check(id):
+        send_join_channels_message(id)
+        return
+    
     keyboard = telebot.types.ReplyKeyboardMarkup(True)
     keyboard.row('🙌🏻 Referrals', '🆔 Account')
     bot.send_message(id, "*🏡 Home*", parse_mode="Markdown", reply_markup=keyboard)
+
+def send_join_channels_message(user_id: int):
+    """Send message with channel join buttons"""
+    markup = telebot.types.InlineKeyboardMarkup()
+    for channel_id in CHANNEL_IDS:
+        try:
+            channel_info = bot.get_chat(channel_id)
+            channel_name = channel_info.title
+            invite_link = get_channel_invite_link(channel_id)
+            if invite_link:
+                markup.add(
+                    telebot.types.InlineKeyboardButton(
+                        text=f'Join {channel_name}',
+                        url=invite_link
+                    )
+                )
+        except Exception as e:
+            print(f"Error getting channel info for {channel_id}: {e}")
+            continue
+    
+    markup.add(
+        telebot.types.InlineKeyboardButton(
+            text='Joined ✅,
+            callback_data='check'
+        )
+    )
+    
+    msg_start = "*🔔 Please join our channels to use this bot:*"
+    bot.send_message(user_id, msg_start, parse_mode="Markdown", reply_markup=markup)
 
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -36,15 +90,8 @@ def start(message):
                 referrer_id = message.text.split()[1]
                 db.create_user(str(user_id), referrer_id, first_name=first_name, username=username)
             
-            markup = telebot.types.InlineKeyboardMarkup()
-            markup.add(telebot.types.InlineKeyboardButton(
-                text='🤼‍♂️ Joined',
-                callback_data='check'
-            ))
-            msg_start = "*🔔 To Use This Bot You Need To Join This Channel:*"
-            for i in CHANNELS:
-                msg_start += f"\n➡️ {i}"
-            bot.send_message(user_id, msg_start, parse_mode="Markdown", reply_markup=markup)
+            send_join_channels_message(user_id)
+            
     except Exception as e:
         print(f"Error in start: {e}")
         bot.send_message(user_id, "This command is having an error. Please wait for the admin to fix it.")
@@ -103,15 +150,10 @@ def query_handler(call):
             else:
                 bot.answer_callback_query(
                     callback_query_id=call.id,
-                    text='❌ You have not Joined'
+                    text='❌ You have not joined all channels'
                 )
                 bot.delete_message(call.message.chat.id, call.message.message_id)
-                markup = telebot.types.InlineKeyboardMarkup()
-                markup.add(telebot.types.InlineKeyboardButton(text='🤼‍♂️ Joined', callback_data='check'))
-                msg_start = "*🔔 To Use This Bot You Need To Join This Channel:*"
-                for i in CHANNELS:
-                    msg_start += f"\n➡️ {i}"
-                bot.send_message(call.message.chat.id, msg_start, parse_mode="Markdown", reply_markup=markup)
+                send_join_channels_message(call.message.chat.id)
 
     except Exception as e:
         print(f"Error in query handler: {e}")
@@ -121,6 +163,10 @@ def query_handler(call):
 @bot.message_handler(content_types=['text'])
 def send_text(message):
     try:
+        if not check(message.chat.id):
+            send_join_channels_message(message.chat.id)
+            return
+            
         if message.text == '🆔 Account':
             user = str(message.chat.id)
             level_info = db.get_user_level_info(user)
